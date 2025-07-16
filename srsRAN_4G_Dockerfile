@@ -1,0 +1,117 @@
+# Dockerfile for building srsRAN 4G from source with ZeroMQ support
+
+# Define build arguments with default values
+ARG OS_VERSION=22.04 # Changed from 24.04 to 22.04 for potential compiler compatibility
+ARG NUM_JOBS="" # Number of parallel jobs for make, empty means nproc (all cores)
+ARG MARCH=native # Architecture optimization for GCC/Clang
+
+##################
+# Stage 1: Build #
+##################
+FROM ubuntu:${OS_VERSION} AS builder
+
+# Set environment variable for non-interactive apt-get operations
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Update package lists and install build dependencies
+# Includes all mandatory srsRAN 4G dependencies + ZeroMQ development libraries
+# 'jq' and 'curl' are included as they were in your initial local install command,
+# though they might not be strictly necessary for the srsRAN build itself.
+# Added 'ca-certificates' to resolve SSL certificate verification issues during git clone.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    libfftw3-dev \
+    libmbedtls-dev \
+    libboost-program-options-dev \
+    libconfig++-dev \
+    libsctp-dev \
+    git \
+    curl \
+    jq \
+    libzmq3-dev \
+    iperf3 \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/* # Clean up apt cache to reduce image size
+
+# Clone the srsRAN_4G repository
+RUN git clone https://github.com/srsRAN/srsRAN_4G.git /srsRAN_4G
+
+# Change to the srsRAN_4G directory
+WORKDIR /srsRAN_4G
+
+# Create a build directory and navigate into it
+RUN mkdir build
+WORKDIR /srsRAN_4G/build
+
+# Configure the build with CMake
+# -DENABLE_EXPORT=ON: Enables export of symbols, potentially useful for linking
+# -DENABLE_ZEROMQ=ON: Explicitly enables ZeroMQ support
+# -DMARCH=${MARCH}: Sets the architecture optimization
+# -DCMAKE_INSTALL_PREFIX=/usr/local: Installs srsRAN to /usr/local
+# -DCMAKE_CXX_FLAGS="-Wno-error": Disables treating C++ warnings as errors
+RUN cmake ../ \
+    -DENABLE_EXPORT=ON \
+    -DENABLE_ZEROMQ=ON \
+    -DMARCH=${MARCH} \
+    -DCMAKE_INSTALL_PREFIX=/usr/local \
+    -DCMAKE_CXX_FLAGS="-Wno-error"
+
+# Compile srsRAN 4G
+# If NUM_JOBS is empty, it defaults to `nproc` (number of available CPU cores)
+RUN if [ -z "$NUM_JOBS" ]; then NUM_JOBS=$(nproc); fi && \
+    make -j${NUM_JOBS}
+
+# Install srsRAN 4G binaries, libraries, and headers
+RUN make install
+
+# Install default srsRAN configuration files
+# The script is in the parent directory of the current WORKDIR (/srsRAN_4G/build)
+# RUN ../srsran_install_configs.sh user
+
+
+##################
+# Stage 2: Run   #
+##################
+FROM ubuntu:${OS_VERSION} AS runtime
+
+# Set environment variable for non-interactive apt-get operations
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install only the necessary runtime dependencies for srsRAN 4G, including ZeroMQ
+# Using -dev packages here to ensure all shared libraries are pulled correctly,
+# although for a truly minimal image, specific runtime library packages would be preferred.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libfftw3-dev \
+    libmbedtls-dev \
+    libboost-program-options-dev \
+    libconfig++-dev \
+    libsctp-dev \
+    libzmq3-dev \
+    iperf3 && \
+    apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* # Clean up apt cache and remove unnecessary packages
+
+# Copy the installed srsRAN 4G binaries, libraries, headers, and configurations
+# from the builder stage to the runtime stage.
+# /usr/local is the default install prefix for srsRAN.
+COPY --from=builder /usr/local /usr/local
+
+# Add srsRAN binaries directory to the PATH
+ENV PATH=$PATH:/usr/local/bin
+
+RUN ldconfig
+
+# Set the working directory for the container
+WORKDIR /usr/local/bin
+
+# Example of how to run an srsRAN 4G application (e.g., srsue)
+# This line is commented out as you'll likely want to run specific commands
+# when you start the container.
+# CMD ["srsue"]
+
+# You can add a default command here, for example, to list available srsRAN binaries:
+CMD ["ls", "/usr/local/bin/srs*"]
+
+
