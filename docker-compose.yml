@@ -1,399 +1,237 @@
-version: '3.9'
-
 services:
-  5gc:
-    container_name: open5gs_5gc
-    build:
-      context: ${OPEN5GS_DIR:-open5gs}
-      target: open5gs
-      args:
-        OS_VERSION: "22.04"
-        OPEN5GS_VERSION: "v2.7.0"
-    env_file:
-      - ${OPEN_5GS_ENV_FILE:-open5gs/open5gs.env}
-    privileged: true
+  # Redis Database for Near-RT RIC (Official Alpine image)
+  redis:
+    image: redis:7-alpine
+    container_name: openran-redis
     ports:
-      - "9999:9999/tcp"
-    #  - "38412:38412/sctp"
-    #  - "2152:2152/udp"
-    command: 5gc -c open5gs-5gc.yml
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - openran-e2
+      - openran-internal
     healthcheck:
-      test: [ "CMD-SHELL", "nc -z 127.0.0.20 7777" ]
-      interval: 3s
-      timeout: 1s
-      retries: 60
-    networks:
-      ran:
-        ipv4_address: ${OPEN5GS_IP:-10.53.1.2}
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
-  gnb:
-    container_name: srsran_gnb
-    image: srsran/gnb
-    build:
-      context: ${SRSRAN_PROJECT:-./}
-      dockerfile: ${GNB_DOCKERFILE:-Dockerfile}
-      args:
-        OS_VERSION: "24.04"
-        EXTRA_CMAKE_ARGS: '-DENABLE_EXPORT=ON -DENABLE_ZEROMQ=ON'
-    # privileged mode is requred only for accessing usb devices
-    privileged: true
-    # Extra capabilities always required
-    cap_add:
-      - SYS_NICE
-      - CAP_SYS_PTRACE
-    volumes:
-      - /dev/bus/usb/:/dev/bus/usb/
-      - /usr/share/uhd/images:/usr/share/uhd/images
-      - gnb-storage:/tmp
-      - ${GNB_CONFIG_PATH:-../configs/gnb_zmq.yaml}:/gnb_config.yml:ro
-    # configs:
-    #   - source: gnb_config.yml
-    #     target: /gnb_config.yml
-    networks:
-      ran:
-        ipv4_address: ${GNB_IP:-10.53.1.3}
-      metrics:
-        ipv4_address: 172.19.1.3
-      ric:
-        ipv4_address: ${GNB_RIC_IP:-10.0.2.3}
-    depends_on:
-      5gc:
-        condition: service_healthy
-      e2term:
-        condition: service_started
-    stdin_open: true
-    tty: true
-    # command: gnb -c /gnb_config.yml cu_cp amf --addr ${OPEN5GS_IP:-10.53.1.2} --bind_addr ${GNB_IP:-10.53.1.3} metrics --autostart_stdout_metrics true --enable_json true --enable_log true --enable_verbose true
-    # command: gnb -c /gnb_config.yml
-    command: >
-      gnb -c /gnb_config.yml
-      cu_cp amf
-        --addr ${OPEN5GS_IP:-10.53.1.2}
-        --bind_addr ${GNB_IP:-10.53.1.3}
-      ru_sdr
-      --device_args tx_port=tcp://*:2000,rx_port=tcp://${UE_IP:-10.53.1.4}:2001,base_srate=11.52e6
-      e2
-        --addr ${E2TERM_IP:-10.0.2.10}
-        --bind_addr ${GNB_RIC_IP:-10.0.2.3}
-      metrics
-        --addr ${METRICS_IP:-127.0.0.1}
-        --port ${METRICS_PORT:-55555}
-        --autostart_stdout_metrics true
-        --enable_json true
-        --enable_log true
-        --enable_verbose true
-      log
-        --all_level debug
-
-
-  srsue:
-    container_name: srsran_ue
-    build:
-      context: ${SRSRAN_4G:-./}
-      Dockerfile: ${UE_DOCKERFILE:-Dockerfile}
-    privileged: true
-    cap_add:
-      - NET_ADMIN
-      - SYS_NICE
-      - IPC_LOCK
-    # configs:
-    #   - source: ue_config.conf
-    #     target: /ue_config.conf
-    volumes:
-      - /dev/bus/usb:/dev/bus/usb
-      - /usr/share/uhd/images:/usr/share/uhd/images
-      - ue-storage:/tmp
-      - ${UE_CONFIG_PATH:-../configs/ue_zmq.conf}:/ue_config.conf:ro
-    networks:
-      ran:
-        ipv4_address: ${UE_IP:-10.53.1.4}
-    depends_on:
-      - gnb
-    command: /usr/local/bin/srsue /ue_config.conf --rf.device_args tx_port=tcp://*:2001,rx_port=tcp://${GNB_IP:-10.53.1.3}:2000,base_srate=11.52e6 --log.all_level debug
-
-  metrics-server:
-    container_name: metrics_server
-    image: srsran/metrics_server
-    build:
-      context: ${METRICS_SERVER_DIR:-metrics_server}
-    environment:
-      - PORT=${METRICS_SERVER_PORT}
-      - BUCKET=${DOCKER_INFLUXDB_INIT_BUCKET}
-      - TESTBED=default
-      - URL=http://${DOCKER_INFLUXDB_INIT_HOST}:${DOCKER_INFLUXDB_INIT_PORT}
-      - ORG=${DOCKER_INFLUXDB_INIT_ORG}
-      - TOKEN=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
-    ports:
-      - 55555:${METRICS_SERVER_PORT}/udp
-    networks:
-      metrics:
-        ipv4_address: 172.19.1.4
-
-  influxdb:
-    container_name: influxdb
-    image: influxdb:${DOCKER_INFLUXDB_VERSION}
-    volumes:
-      - influxdb-storage:/var/lib/influxdb2:rw
-    env_file:
-      - .env
-    restart: on-failure:10
-    # ports:
-    #   - 8086:${DOCKER_INFLUXDB_INIT_PORT}
-    networks:
-      metrics:
-        ipv4_address: 172.19.1.5
-
-  grafana:
-    container_name: grafana
-    image: srsran/grafana
-    build:
-      context: ${GRAFANA_DIR:-grafana}
-      args:
-        GRAFANA_VERSION: ${DOCKER_GRAFANA_VERSION}
-        LOGO_URL: ${GRAFANA_LOGO_URL}
-    volumes:
-      - grafana-storage:/var/lib/grafana:rw
-    env_file:
-      - .env
-    depends_on:
-      - influxdb
-      - metrics-server
-    ports:
-      - 3300:${GRAFANA_PORT}
-    networks:
-      metrics:
-        ipv4_address: 172.19.1.6
-
-  dbaas:
-    container_name: ric_dbaas
-    hostname: dbaas
-    image: nexus3.o-ran-sc.org:10002/o-ran-sc/ric-plt-dbaas:${DBAAS_VER}
-    command: redis-server --loadmodule /usr/local/libexec/redismodule/libredismodule.so
-    depends_on:
-      5gc:
-        condition: service_healthy
-    networks:
-      ric:
-        ipv4_address: ${DBAAS_IP:-10.0.2.12}
-
-  rtmgr_sim:
-    container_name: ric_rtmgr_sim
-    hostname: rtmgr_sim
-    image: rtmgr_sim:${SC_RIC_VERSION}
-    build:
-      context: ${RTMGR_SIM_DIR:-./ric/images/rtmgr_sim}
-      args:
-        SC_RIC_VERSION: ${SC_RIC_VERSION}
-    env_file:
-      - .env
-    environment:
-      - CONTAINER_NAME=ric_${RTMGR_SIM_NAME}
-      - HOST_NAME=ric_${RTMGR_SIM_NAME}_host
-      - POD_NAME=${RTMGR_SIM_NAME}_pod
-      - SERVICE_NAME=ric_${RTMGR_SIM_NAME}_service
-      - CFGFILE=/cfg/rtmgr-config.yaml
-      - RMR_SEED_RT=/opt/config/uta-rtg.rt
-      - RMR_SRC_ID=${RTMGR_SIM_IP}
-    volumes:
-      - type: bind
-        source: ${RTMGR_SIM_CONFIG_PATH:-./ric/configs/rtmgr.yaml}
-        target: /opt/rmsimulator/resources/configuration.yaml
-      - type: bind
-        source: ${RTMGR_SIM_ROUTES_PATH:-./ric/configs/routes.rtg}
-        target: /opt/config/uta-rtg.rt
-    depends_on:
-      dbaas:
-        condition: service_started
-    networks:
-      ric:
-        ipv4_address: ${RTMGR_SIM_IP:-10.0.2.15}
-
-  submgr:
-    container_name: ric_submgr
-    hostname: submgr
-    image: nexus3.o-ran-sc.org:10002/o-ran-sc/ric-plt-submgr:${SUBMGR_VER}
-    depends_on:
-      dbaas:
-        condition: service_started
-    env_file:
-      - .env
-    environment:
-      - CONTAINER_NAME=ric_${SUBMGR_NAME}
-      - HOST_NAME=ric_${SUBMGR_NAME}_host
-      - POD_NAME=${SUBMGR_NAME}_pod
-      - SERVICE_NAME=ric_${SUBMGR_NAME}_service
-      - CFG_FILE=/opt/config/submgr-config.yaml
-      - RMR_SEED_RT=/opt/config/submgr-uta-rtg.rt
-      - RMR_SRC_ID=${SUBMGR_IP}
-    command: ./submgr -f ${CFG_FILE}
-    volumes:
-      - type: bind
-        source: ${SUBMGR_CONFIG_PATH:-./ric/configs/submgr.yaml}
-        target: /opt/config/submgr-config.yaml
-      - type: bind
-        source: ${SUBMGR_ROUTES_PATH:-./ric/configs/routes.rtg}
-        target: /opt/config/submgr-uta-rtg.rt
-    networks:
-      ric:
-        ipv4_address: ${SUBMGR_IP:-10.0.2.13}
-
+  # E2 Termination (Simple simulation)
   e2term:
-    container_name: ric_e2term
-    hostname: e2term
-    image: nexus3.o-ran-sc.org:10002/o-ran-sc/ric-plt-e2:${E2TERM_VER}
-    # ports:
-      # - "36421:36421/sctp"
-    env_file:
-      - .env
-    environment:
-      - CONTAINER_NAME=ric_${E2TERM_NAME}
-      - HOST_NAME=ric_${E2TERM_NAME}_host
-      - POD_NAME=${E2TERM_NAME}_pod
-      - SERVICE_NAME=ric_${E2TERM_NAME}_service
-      - print=1
-      - RMR_SEED_RT=/opt/e2/dockerRouter.txt
-      - RMR_SRC_ID=${E2TERM_IP}
-    command: ./e2 -p config -f config.conf
-    volumes:
-      - type: bind
-        source: ${E2TERM_CONFIG_PATH:-./ric/configs/e2term.conf}
-        target: /opt/e2/config/config.conf
-      - type: bind
-        source: ${E2TERM_ROUTES_PATH:-./ric/configs/routes.rtg}
-        target: /opt/e2/dockerRouter.txt
-    depends_on:
-      rtmgr_sim:
-        condition: service_started
-      submgr:
-        condition: service_started
-    networks:
-      ric:
-        ipv4_address: ${E2TERM_IP:-10.0.2.10}
-
-  appmgr:
-    container_name: ric_appmgr
-    hostname: appmgr
-    image: nexus3.o-ran-sc.org:10002/o-ran-sc/ric-plt-appmgr:${APPMGR_VER}
-    env_file:
-      - .env
-    environment:
-      - CONTAINER_NAME=ric_${APPMGR_NAME}
-      - HOST_NAME=ric_${APPMGR_NAME}_host
-      - POD_NAME=${APPMGR_NAME}_pod
-      - SERVICE_NAME=ric_${APPMGR_NAME}_service
-      - RMR_SEED_RT=/opt/ric/config/router.txt
-      - RMR_SRC_ID=${APPMGR_IP}
-    volumes:
-      - type: bind
-        source: ${APPMGR_ROUTES_PATH:-./ric/configs/routes.rtg}
-        target:  /opt/ric/config/router.txt
-      - type: bind
-        source: ${APPMGR_CONFIG_PATH:-./ric/configs/appmgr.yaml}
-        target: /opt/ric/config/appmgr.yaml
-    depends_on:
-      e2term:
-        condition: service_started
-    networks:
-      ric:
-        ipv4_address: ${APPMGR_IP:-10.0.2.14}
-
-  e2mgr:
-    container_name: ric_e2mgr
-    hostname: e2mgr
-    image: nexus3.o-ran-sc.org:10002/o-ran-sc/ric-plt-e2mgr:${E2MGR_VER}
-    env_file:
-      - .env
-    environment:
-      - CONTAINER_NAME=ric_${E2MGR_NAME}
-      - HOST_NAME=ric_${E2MGR_NAME}_host
-      - POD_NAME=${E2MGR_NAME}_pod
-      - SERVICE_NAME=ric_${E2MGR_NAME}_service
-      - RMR_SEED_RT=/opt/E2Manager/router.txt
-      - RMR_SRC_ID=${E2MGR_IP}
-    command: ./main -port=3800 -f /opt/E2Manager/resources/configuration.yaml
-    volumes:
-      - type: bind
-        source: ${E2MGR_ROUTES_PATH:-./ric/configs/routes.rtg}
-        target: /opt/E2Manager/router.txt
-      - type: bind
-        source: ${E2MGR_CONFIG_PATH:-./ric/configs/e2mgr.yaml}
-        target: /opt/E2Manager/resources/configuration.yaml
-    depends_on:
-      appmgr:
-        condition: service_started
-    networks:
-      ric:
-        ipv4_address: ${E2MGR_IP:-10.0.2.11}
-
-  # iperf3-server:
-  #   container_name: iperf3-server
-  #   image: networkstatic/iperf3
-  #   command: iperf3 -s
-  #   networks:
-  #     ran:
-  #       ipv4_address: 10.53.1.100
-
-  python_xapp_runner:
-    container_name: python_xapp_runner
-    hostname: python_xapp_runner
-    image: python_xapp_runner:${SC_RIC_VERSION}
     build:
-      context: ${XAPP_PY_RUNNER_DIR:-./ric/images/ric-plt-xapp-frame-py}
-    env_file:
-      - .env
+      context: .
+      dockerfile: Dockerfile.e2term.simple
+    container_name: openran-e2term
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "36421:36421"  # E2 interface
+      - "36422:36422"  # E2 interface backup
     environment:
-      - PYTHONUNBUFFERED=0
-      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
-      - RMR_SEED_RT=/opt/ric/config/uta-rtg.rt
-      - RMR_SRC_ID=${XAPP_PY_RUNNER_IP}
-      - RMR_RTG_SVC
-    # stdin_open: true
-    # tty: true
-    entrypoint: [/bin/bash]
+      - RMR_SEED_RT=/opt/e2/init/routes.txt
+      - RMR_RTG_SVC=9999
+      - DBAAS_SERVICE_HOST=redis
+      - DBAAS_SERVICE_PORT=6379
     volumes:
-      - type: bind
-        source: ${XAPP_PY_RUNNER_ROUTES_PATH:-./ric/configs/routes.rtg}
-        target: /opt/ric/config/uta-rtg.rt
-      - type: bind
-        source: ${XAPP_PY_RUNNER_XAPP_PATH:-./xApps/python}
-        target: /opt/xApps
-    # Uncomment if you want to use your local ric-plt-xapp-frame-py copy inside the container
-    #- type: bind
-    #  source: ./Path/to/your/local/ric-plt-xapp-frame-py
-    #  target: /opt/ric-plt-xapp-frame-py
-    # depends_on:
-      # e2mgr:
-        # condition: service_started
+      - e2term-logs:/opt/e2/logs
     networks:
-      ric:
-        ipv4_address: ${XAPP_PY_RUNNER_IP:-10.0.2.20}
+      - openran-e2
+      - openran-internal
+    restart: unless-stopped
 
-# configs:
-#   gnb_config.yml:
-#     file: ${GNB_CONFIG_PATH:-../configs/gnb_zmq.yaml}
-#   ue_config.conf:
-#     file: ${UE_CONFIG_PATH:-../configs/ue_zmq.conf}
+  # E2 Manager (Simple simulation)
+  e2mgr:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2mgr.simple
+    container_name: openran-e2mgr
+    depends_on:
+      - redis
+      - e2term
+    ports:
+      - "3800:3800"    # HTTP API
+    environment:
+      - RMR_SEED_RT=/opt/e2mgr/init/routes.txt
+      - RMR_RTG_SVC=9999
+      - DBAAS_SERVICE_HOST=redis
+      - DBAAS_SERVICE_PORT=6379
+    volumes:
+      - e2mgr-logs:/opt/e2mgr/logs
+    networks:
+      - openran-e2
+      - openran-internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3800/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
 
-volumes:
-  gnb-storage:
-  grafana-storage:
-  influxdb-storage:
-  ue-storage:
+  # Routing Manager (Simple simulation)
+  rtmgr:
+    build:
+      context: .
+      dockerfile: Dockerfile.rtmgr.simple
+    container_name: openran-rtmgr
+    depends_on:
+      - redis
+      - e2term
+      - e2mgr
+    ports:
+      - "4561:4561"    # RMR routing
+    environment:
+      - RMR_SEED_RT=/opt/rtmgr/init/routes.txt
+      - RMR_RTG_SVC=9999
+      - DBAAS_SERVICE_HOST=redis
+      - DBAAS_SERVICE_PORT=6379
+    volumes:
+      - rtmgr-logs:/opt/rtmgr/logs
+    networks:
+      - openran-e2
+      - openran-internal
+    restart: unless-stopped
+
+
+  # Sample xApp (Simple Alpine-based)
+  sample-xapp:
+    build:
+      context: .
+      dockerfile: Dockerfile.xapp.simple
+    container_name: openran-sample-xapp
+    depends_on:
+      - e2mgr
+    ports:
+      - "4560:4560"    # xApp communication
+      - "8080:8080"    # xApp HTTP API
+    environment:
+      - RMR_SEED_RT=/opt/xapp/config/routes.txt
+      - RMR_RTG_SVC=9999
+      - XAPP_NAME=sample-xapp
+      - LOG_LEVEL=INFO
+    volumes:
+      - xapp-logs:/opt/xapp/logs
+    networks:
+      - openran-e2
+      - openran-internal
+    healthcheck:
+      test: ["CMD", "pgrep", "sample-xapp"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # RAN Simulator (Simple Alpine-based)
+  ran-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.ran-sim.simple
+    container_name: openran-ran-simulator
+    depends_on:
+      - e2term
+      - e2mgr
+    environment:
+      - RMR_SEED_RT=/opt/ran-sim/config/routes.txt
+      - RMR_RTG_SVC=9999
+      - GNB_ID=1
+      - CELL_ID=1
+      - LOG_LEVEL=INFO
+    volumes:
+      - ran-sim-logs:/opt/ran-sim/logs
+    networks:
+      - openran-e2
+    healthcheck:
+      test: ["CMD", "pgrep", "ran-simulator"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # Prometheus for monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: openran-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - openran-internal
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: openran-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - openran-internal
+
+  # ELK Stack for logging (Elasticsearch)
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.14.0
+    container_name: openran-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - openran-internal
+
+  # Kibana for log visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.14.0
+    container_name: openran-kibana
+    depends_on:
+      - elasticsearch
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+    networks:
+      - openran-internal
 
 networks:
-  ran:
+  openran-e2:
+    driver: bridge
     ipam:
-      driver: default
       config:
-        - subnet: 10.53.1.0/24
-  ric:
+        - subnet: 172.20.0.0/16
+  openran-internal:
+    driver: bridge
     ipam:
-      driver: default
       config:
-        - subnet: 10.0.2.0/24
-  metrics:
-    ipam:
-      driver: default
-      config:
-        - subnet: 172.19.1.0/24
+        - subnet: 172.22.0.0/16
 
+volumes:
+  redis-data:
+  e2term-logs:
+  e2mgr-logs:
+  rtmgr-logs:
+  xapp-logs:
+  ran-sim-logs:
+  prometheus-data:
+  grafana-data:
+  elasticsearch-data:

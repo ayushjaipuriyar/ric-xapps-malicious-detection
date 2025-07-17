@@ -1,0 +1,104 @@
+# OpenRAN RAN Simulator Dockerfile
+# Simulates RAN nodes for testing OpenRAN components
+
+FROM ubuntu:20.04
+
+# Prevent interactive installation prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Set environment variables
+ENV RIC_HOST=nearrt-ric
+ENV RIC_PORT=36421
+ENV GNB_ID=1
+ENV CELL_ID=1
+ENV LOG_LEVEL=INFO
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    curl \
+    git \
+    pkg-config \
+    libsctp-dev \
+    libssl-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    libzmq3-dev \
+    libjsoncpp-dev \
+    libcurl4-openssl-dev \
+    libboost-all-dev \
+    python3 \
+    python3-pip \
+    net-tools \
+    iputils-ping \
+    tcpdump \
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create workspace directory
+WORKDIR /workspace
+
+# Clone and build E2 simulator
+RUN git clone -b bronze https://github.com/o-ran-sc/ric-plt-e2sim e2sim && \
+    cd e2sim && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DDEV_PKG=1 -DLOG_LEVEL=${LOG_LEVEL} && \
+    make -j$(nproc) && \
+    make install
+
+# Clone and build RIC message router
+RUN git clone -b bronze https://github.com/o-ran-sc/ric-plt-lib-rmr rmr && \
+    cd rmr && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DDEV_PKG=1 && \
+    make -j$(nproc) && \
+    make install
+
+# Set up configuration directory
+RUN mkdir -p /opt/ran-sim/config
+
+# Create configuration files
+RUN cat > /opt/ran-sim/config/e2sim.conf << 'EOF'
+# E2 Simulator Configuration
+ric_ip = "nearrt-ric"
+ric_port = 36421
+gnb_id = 1
+cell_id = 1
+plmn_id = "001001"
+EOF
+
+# Create RAN simulator startup script
+RUN cat > /opt/ran-sim/start-ran-sim.sh << 'EOF'
+#!/bin/bash
+
+# Wait for RIC to be ready
+echo "Waiting for RIC to be ready..."
+while ! nc -z ${RIC_HOST} ${RIC_PORT}; do
+    sleep 1
+done
+
+echo "RIC is ready, starting RAN simulator..."
+
+# Start E2 simulator
+cd /workspace/e2sim/build
+./e2sim -f /opt/ran-sim/config/e2sim.conf \
+        -h ${RIC_HOST} \
+        -p ${RIC_PORT} \
+        -g ${GNB_ID} \
+        -c ${CELL_ID}
+EOF
+
+RUN chmod +x /opt/ran-sim/start-ran-sim.sh
+
+# Expose ports for E2 interface
+EXPOSE 36421 36422
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD netstat -an | grep ${RIC_PORT} || exit 1
+
+# Start the RAN simulator
+CMD ["/opt/ran-sim/start-ran-sim.sh"]

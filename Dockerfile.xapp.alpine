@@ -1,0 +1,225 @@
+# Multi-stage Alpine-based xApp Dockerfile
+# Stage 1: Build stage
+FROM --platform=linux/amd64 alpine:3.18 AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    cmake \
+    git \
+    pkgconfig \
+    curl-dev \
+    openssl-dev \
+    zlib-dev \
+    boost-dev \
+    protobuf-dev \
+    nlohmann-json
+
+# Set working directory
+WORKDIR /build
+
+# Clone and build RIC message router (RMR)
+RUN git clone -b 4.9.4 https://github.com/o-ran-sc/ric-plt-lib-rmr.git rmr && \
+    cd rmr && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make -j$(nproc) && \
+    make install
+
+# Clone and build JSON Schema Validator (required by xApp framework)
+RUN git clone https://github.com/pboettch/json-schema-validator.git && \
+    cd json-schema-validator && \
+    git checkout cae6fad80001510077a7f40e68477a31ec443add && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make -j$(nproc) && \
+    make install
+
+# Clone and build xApp framework
+RUN git clone -b master https://github.com/o-ran-sc/ric-plt-xapp-frame-cpp.git xapp-fw && \
+    cd xapp-fw && \
+    rm -rf build && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make -j$(nproc) && \
+    make install
+
+# Create sample xApp source
+RUN mkdir -p /build/sample-xapp
+COPY <<EOF /build/sample-xapp/main.cpp
+#include <iostream>
+#include <unistd.h>
+#include <signal.h>
+#include <thread>
+#include <atomic>
+
+std::atomic<bool> running(true);
+
+void signal_handler(int signal) {
+    std::cout << "Received signal " << signal << ", shutting down..." << std::endl;
+    running = false;
+}
+
+int main() {
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    
+    std::cout << "OpenRAN Sample xApp starting..." << std::endl;
+    
+    // Simulate xApp functionality
+    int counter = 0;
+    while (running) {
+        std::cout << "xApp iteration " << ++counter << " - Processing E2 messages..." << std::endl;
+        
+        // Simulate some work
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        
+        // In a real xApp, this would:
+        // 1. Receive E2 indication messages
+        // 2. Process RAN metrics
+        // 3. Make AI/ML decisions
+        // 4. Send control messages back
+    }
+    
+    std::cout << "xApp shutdown complete." << std::endl;
+    return 0;
+}
+EOF
+
+COPY <<EOF /build/sample-xapp/CMakeLists.txt
+cmake_minimum_required(VERSION 3.10)
+project(sample-xapp)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(RMR REQUIRED rmr)
+
+add_executable(sample-xapp main.cpp)
+target_link_libraries(sample-xapp \${RMR_LIBRARIES})
+target_include_directories(sample-xapp PRIVATE \${RMR_INCLUDE_DIRS})
+target_compile_options(sample-xapp PRIVATE \${RMR_CFLAGS_OTHER})
+EOF
+
+# Build the sample xApp
+RUN cd /build/sample-xapp && \
+    mkdir build && \
+    cd build && \
+    cmake .. && \
+    make -j$(nproc)
+
+# Stage 2: Runtime stage
+FROM --platform=linux/amd64 alpine:3.18
+
+# Install runtime dependencies only
+RUN apk add --no-cache \
+    libstdc++ \
+    libgcc \
+    curl \
+    openssl \
+    zlib \
+    boost-system \
+    boost-filesystem \
+    protobuf \
+    ca-certificates
+
+# Copy built binaries and libraries from builder stage
+COPY --from=builder /usr/local/lib/librmr* /usr/local/lib/
+COPY --from=builder /build/sample-xapp/build/sample-xapp /usr/local/bin/
+
+# Create xApp user for security
+RUN addgroup -g 1000 xapp && \
+    adduser -u 1000 -G xapp -s /bin/sh -D xapp
+
+# Set up directories
+RUN mkdir -p /opt/xapp/{config,logs,data} && \
+    chown -R xapp:xapp /opt/xapp
+
+# Create xApp configuration
+RUN cat > /opt/xapp/config/config.json << 'EOF'
+{
+  "xapp_name": "sample-xapp",
+  "version": "1.0.0",
+  "containers": [
+    {
+      "name": "sample-xapp",
+      "image": {
+        "registry": "local",
+        "name": "openran-xapp-alpine",
+        "tag": "latest"
+      }
+    }
+  ],
+  "messaging": {
+    "ports": [
+      {
+        "name": "rmr-data",
+        "container": "sample-xapp",
+        "port": 4560,
+        "rxMessages": ["RIC_SUB_RESP", "RIC_INDICATION"],
+        "txMessages": ["RIC_SUB_REQ", "RIC_CONTROL_REQ"]
+      }
+    ]
+  },
+  "rmr": {
+    "protPort": 4560,
+    "maxSize": 65536,
+    "numWorkers": 1,
+    "txMessages": ["RIC_SUB_REQ", "RIC_CONTROL_REQ"],
+    "rxMessages": ["RIC_SUB_RESP", "RIC_INDICATION"]
+  }
+}
+EOF
+
+# Create startup script
+RUN cat > /opt/xapp/start-xapp.sh << 'EOF'
+#!/bin/sh
+
+# Wait for RIC components to be ready
+echo "Waiting for E2 Manager to be ready..."
+while ! nc -z e2mgr 3800; do
+    sleep 1
+done
+
+echo "E2 Manager is ready, starting xApp..."
+
+# Set RMR environment variables
+export RMR_SEED_RT=/opt/xapp/config/routes.txt
+export RMR_RTG_SVC=9999
+
+# Start the xApp
+exec /usr/local/bin/sample-xapp
+EOF
+
+# Create routing table
+RUN cat > /opt/xapp/config/routes.txt << 'EOF'
+newrt|start
+rte|12001|localhost:4560
+rte|12002|localhost:4560
+newrt|end
+EOF
+
+RUN chmod +x /opt/xapp/start-xapp.sh && \
+    chown xapp:xapp /opt/xapp/start-xapp.sh
+
+# Switch to non-root user
+USER xapp
+
+# Set environment variables
+ENV RMR_SEED_RT=/opt/xapp/config/routes.txt
+ENV RMR_RTG_SVC=9999
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+# Expose ports
+EXPOSE 4560 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD pgrep sample-xapp || exit 1
+
+# Start the xApp
+CMD ["/opt/xapp/start-xapp.sh"]

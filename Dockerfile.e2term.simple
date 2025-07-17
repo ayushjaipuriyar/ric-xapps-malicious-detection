@@ -1,0 +1,34 @@
+# Simple E2 Termination Service
+FROM --platform=linux/amd64 alpine:3.18
+
+RUN apk add --no-cache \
+    curl \
+    netcat-openbsd \
+    ca-certificates
+
+RUN addgroup -g 1000 e2term && \
+    adduser -u 1000 -G e2term -s /bin/sh -D e2term
+
+RUN mkdir -p /opt/e2/{logs,config} && \
+    chown -R e2term:e2term /opt/e2
+
+RUN cat > /opt/e2/e2term-simulator.sh << 'EOF'
+#!/bin/sh
+echo "E2 Termination Service starting..."
+echo "Listening on port 36421 for E2 interface connections..."
+
+while true; do
+    echo "E2 Term: Waiting for connections on port 36421..."
+    nc -l -p 36421 || sleep 5
+done
+EOF
+
+RUN chmod +x /opt/e2/e2term-simulator.sh && \
+    chown e2term:e2term /opt/e2/e2term-simulator.sh
+
+USER e2term
+EXPOSE 36421 36422
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD pgrep -f e2term-simulator || exit 1
+
+CMD ["/opt/e2/e2term-simulator.sh"]

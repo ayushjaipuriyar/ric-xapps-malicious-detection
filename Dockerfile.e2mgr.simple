@@ -1,0 +1,35 @@
+# Simple E2 Manager Service
+FROM --platform=linux/amd64 alpine:3.18
+
+RUN apk add --no-cache \
+    curl \
+    netcat-openbsd \
+    ca-certificates
+
+RUN addgroup -g 1000 e2mgr && \
+    adduser -u 1000 -G e2mgr -s /bin/sh -D e2mgr
+
+RUN mkdir -p /opt/e2mgr/{logs,config} && \
+    chown -R e2mgr:e2mgr /opt/e2mgr
+
+RUN cat > /opt/e2mgr/e2mgr-simulator.sh << 'EOF'
+#!/bin/sh
+echo "E2 Manager Service starting..."
+echo "HTTP API listening on port 3800..."
+
+# Create a simple HTTP server using netcat
+while true; do
+    echo "E2 Manager: Waiting for HTTP requests on port 3800..."
+    { echo "HTTP/1.1 200 OK"; echo "Content-Type: application/json"; echo ""; echo '{"status":"healthy","service":"e2mgr"}'; } | nc -l -p 3800 || sleep 1
+done
+EOF
+
+RUN chmod +x /opt/e2mgr/e2mgr-simulator.sh && \
+    chown e2mgr:e2mgr /opt/e2mgr/e2mgr-simulator.sh
+
+USER e2mgr
+EXPOSE 3800
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3800/v1/health || exit 1
+
+CMD ["/opt/e2mgr/e2mgr-simulator.sh"]

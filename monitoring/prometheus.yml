@@ -1,0 +1,60 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  # Near-RT RIC components
+  - job_name: "openran-e2term"
+    static_configs:
+      - targets: ["e2term:9090"]
+    scrape_interval: 10s
+    metrics_path: /metrics
+
+  - job_name: "openran-e2mgr"
+    static_configs:
+      - targets: ["e2mgr:9090"]
+    scrape_interval: 10s
+    metrics_path: /metrics
+
+  - job_name: "openran-rtmgr"
+    static_configs:
+      - targets: ["rtmgr:9090"]
+    scrape_interval: 10s
+    metrics_path: /metrics
+
+  # xApp monitoring
+  - job_name: "openran-xapp"
+    static_configs:
+      - targets: ["sample-xapp:9090"]
+    scrape_interval: 10s
+    metrics_path: /metrics
+
+  # RAN Simulator
+  - job_name: "openran-ran-sim"
+    static_configs:
+      - targets: ["ran-simulator:9090"]
+    scrape_interval: 10s
+    metrics_path: /metrics
+
+  # Redis monitoring
+  - job_name: "redis"
+    static_configs:
+      - targets: ["redis:6379"]
+    scrape_interval: 30s
+
+  # Docker container metrics (if node_exporter is available)
+  - job_name: "docker-containers"
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+    scrape_interval: 30s
+
+  # OpenRAN Custom Metrics Exporter
+  - job_name: "openran-metrics"
+    static_configs:
+      - targets: ["host.docker.internal:9091"]
+    scrape_interval: 10s
+    metrics_path: /metrics

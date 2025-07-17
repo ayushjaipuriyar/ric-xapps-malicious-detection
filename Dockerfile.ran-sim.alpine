@@ -1,0 +1,224 @@
+# Alpine-based RAN Simulator Dockerfile
+# Multi-stage build for minimal size
+FROM --platform=linux/amd64 alpine:3.18 AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    cmake \
+    git \
+    pkgconfig \
+    curl-dev \
+    openssl-dev \
+    zlib-dev \
+    boost-dev \
+    protobuf-dev \
+    nlohmann-json
+
+# Set working directory
+WORKDIR /build
+
+# Clone and build RIC message router (RMR)
+RUN git clone -b 4.9.4 https://github.com/o-ran-sc/ric-plt-lib-rmr.git rmr && \
+    cd rmr && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make -j$(nproc) && \
+    make install
+
+# Clone and build E2 simulator
+RUN git clone -b dawn https://github.com/o-ran-sc/sim-e2-interface.git e2sim && \
+    cd e2sim/e2sim && \
+    rm -rf build && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make -j$(nproc) && \
+    make install
+
+# Create enhanced RAN simulator source
+RUN mkdir -p /build/ran-sim
+COPY <<EOF /build/ran-sim/main.cpp
+#include <iostream>
+#include <unistd.h>
+#include <signal.h>
+#include <thread>
+#include <atomic>
+#include <random>
+#include <chrono>
+
+std::atomic<bool> running(true);
+
+void signal_handler(int signal) {
+    std::cout << "Received signal " << signal << ", shutting down RAN simulator..." << std::endl;
+    running = false;
+}
+
+class RANSimulator {
+private:
+    std::random_device rd;
+    std::mt19937 gen;
+    std::uniform_int_distribution<> ue_dist;
+    std::uniform_real_distribution<> throughput_dist;
+    std::uniform_real_distribution<> latency_dist;
+    
+public:
+    RANSimulator() : gen(rd()), ue_dist(10, 100), throughput_dist(1.0, 100.0), latency_dist(1.0, 50.0) {}
+    
+    void simulate() {
+        int iteration = 0;
+        
+        while (running) {
+            iteration++;
+            
+            // Simulate RAN metrics
+            int active_ues = ue_dist(gen);
+            double avg_throughput = throughput_dist(gen);
+            double avg_latency = latency_dist(gen);
+            
+            std::cout << "=== RAN Simulation Iteration " << iteration << " ===" << std::endl;
+            std::cout << "Active UEs: " << active_ues << std::endl;
+            std::cout << "Average Throughput: " << avg_throughput << " Mbps" << std::endl;
+            std::cout << "Average Latency: " << avg_latency << " ms" << std::endl;
+            
+            // Simulate E2 message generation
+            std::cout << "Generating E2 indication messages..." << std::endl;
+            
+            // In a real simulator, this would:
+            // 1. Generate E2 indication messages with RAN metrics
+            // 2. Send them to the Near-RT RIC via E2 interface
+            // 3. Receive control messages from xApps
+            // 4. Apply control decisions to simulated RAN
+            
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+        }
+        
+        std::cout << "RAN Simulator shutdown complete." << std::endl;
+    }
+};
+
+int main() {
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    
+    std::cout << "OpenRAN RAN Simulator starting..." << std::endl;
+    std::cout << "Simulating gNB with E2 interface..." << std::endl;
+    
+    RANSimulator simulator;
+    simulator.simulate();
+    
+    return 0;
+}
+EOF
+
+COPY <<EOF /build/ran-sim/CMakeLists.txt
+cmake_minimum_required(VERSION 3.10)
+project(ran-simulator)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(RMR REQUIRED rmr)
+
+add_executable(ran-simulator main.cpp)
+target_link_libraries(ran-simulator \${RMR_LIBRARIES})
+target_include_directories(ran-simulator PRIVATE \${RMR_INCLUDE_DIRS})
+target_compile_options(ran-simulator PRIVATE \${RMR_CFLAGS_OTHER})
+EOF
+
+# Build the RAN simulator
+RUN cd /build/ran-sim && \
+    mkdir build && \
+    cd build && \
+    cmake .. && \
+    make -j$(nproc)
+
+# Stage 2: Runtime stage
+FROM --platform=linux/amd64 alpine:3.18
+
+# Install runtime dependencies only
+RUN apk add --no-cache \
+    libstdc++ \
+    libgcc \
+    curl \
+    openssl \
+    zlib \
+    boost-system \
+    boost-filesystem \
+    protobuf \
+    netcat-openbsd \
+    ca-certificates
+
+# Copy built binaries and libraries from builder stage
+COPY --from=builder /usr/local/lib/librmr* /usr/local/lib/
+COPY --from=builder /build/ran-sim/build/ran-simulator /usr/local/bin/
+
+# Create ransim user for security
+RUN addgroup -g 1000 ransim && \
+    adduser -u 1000 -G ransim -s /bin/sh -D ransim
+
+# Set up directories
+RUN mkdir -p /opt/ran-sim/{config,logs,data} && \
+    chown -R ransim:ransim /opt/ran-sim
+
+# Create configuration files
+RUN cat > /opt/ran-sim/config/e2sim.conf << 'EOF'
+# E2 Simulator Configuration
+ric_ip = "e2term"
+ric_port = 36421
+gnb_id = 1
+cell_id = 1
+plmn_id = "001001"
+tac = 1
+nr_cell_id = 1
+EOF
+
+RUN cat > /opt/ran-sim/config/routes.txt << 'EOF'
+newrt|start
+rte|12001|e2term:36421
+rte|12002|e2term:36421
+newrt|end
+EOF
+
+# Create startup script
+RUN cat > /opt/ran-sim/start-ran-sim.sh << 'EOF'
+#!/bin/sh
+
+# Wait for E2 termination to be ready
+echo "Waiting for E2 termination to be ready..."
+while ! nc -z e2term 36421; do
+    sleep 1
+done
+
+echo "E2 termination is ready, starting RAN simulator..."
+
+# Set RMR environment variables
+export RMR_SEED_RT=/opt/ran-sim/config/routes.txt
+export RMR_RTG_SVC=9999
+
+# Start the RAN simulator
+exec /usr/local/bin/ran-simulator
+EOF
+
+RUN chmod +x /opt/ran-sim/start-ran-sim.sh && \
+    chown ransim:ransim /opt/ran-sim/start-ran-sim.sh
+
+# Switch to non-root user
+USER ransim
+
+# Set environment variables
+ENV RMR_SEED_RT=/opt/ran-sim/config/routes.txt
+ENV RMR_RTG_SVC=9999
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+# Expose ports for E2 interface
+EXPOSE 36421 36422
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD pgrep ran-simulator || exit 1
+
+# Start the RAN simulator
+CMD ["/opt/ran-sim/start-ran-sim.sh"]

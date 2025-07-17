@@ -1,0 +1,103 @@
+# Simple RAN Simulator Dockerfile
+FROM --platform=linux/amd64 alpine:3.18
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    libstdc++ \
+    libgcc \
+    curl \
+    openssl \
+    zlib \
+    boost-system \
+    boost-filesystem \
+    protobuf \
+    netcat-openbsd \
+    ca-certificates
+
+# Create ransim user for security
+RUN addgroup -g 1000 ransim && \
+    adduser -u 1000 -G ransim -s /bin/sh -D ransim
+
+# Set up directories
+RUN mkdir -p /opt/ran-sim/{config,logs,data} && \
+    chown -R ransim:ransim /opt/ran-sim
+
+# Create RAN simulator
+RUN cat > /opt/ran-sim/ran-simulator.sh << 'EOF'
+#!/bin/sh
+
+echo "OpenRAN RAN Simulator starting..."
+echo "gNB ID: ${GNB_ID:-1}"
+echo "Cell ID: ${CELL_ID:-1}"
+echo "Log Level: ${LOG_LEVEL:-INFO}"
+
+# Wait for E2 termination to be ready
+echo "Waiting for E2 termination to be ready..."
+while ! nc -z e2term 36421; do
+    sleep 2
+done
+
+echo "E2 termination is ready, starting RAN simulation..."
+
+iteration=0
+while true; do
+    iteration=$((iteration + 1))
+    
+    # Simulate RAN metrics
+    active_ues=$((10 + RANDOM % 90))
+    avg_throughput=$((1 + RANDOM % 99))
+    avg_latency=$((1 + RANDOM % 49))
+    
+    echo "=== RAN Simulation Iteration $iteration ==="
+    echo "Active UEs: $active_ues"
+    echo "Average Throughput: $avg_throughput Mbps"
+    echo "Average Latency: $avg_latency ms"
+    echo "Generating E2 indication messages..."
+    echo "Sending metrics to Near-RT RIC..."
+    
+    # Simulate E2 message generation and processing
+    sleep 10
+done
+EOF
+
+RUN chmod +x /opt/ran-sim/ran-simulator.sh && \
+    chown ransim:ransim /opt/ran-sim/ran-simulator.sh
+
+# Create configuration files
+RUN mkdir -p /opt/ran-sim/config && \
+    cat > /opt/ran-sim/config/e2sim.conf << 'EOF'
+# E2 Simulator Configuration
+ric_ip = "e2term"
+ric_port = 36421
+gnb_id = 1
+cell_id = 1
+plmn_id = "001001"
+tac = 1
+nr_cell_id = 1
+EOF
+
+RUN cat > /opt/ran-sim/config/routes.txt << 'EOF'
+newrt|start
+rte|12001|e2term:36421
+rte|12002|e2term:36421
+newrt|end
+EOF
+
+# Switch to non-root user
+USER ransim
+
+# Set environment variables
+ENV GNB_ID=1
+ENV CELL_ID=1
+ENV LOG_LEVEL=INFO
+ENV RMR_SEED_RT=/opt/ran-sim/config/routes.txt
+
+# Expose ports for E2 interface
+EXPOSE 36421 36422
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD pgrep -f ran-simulator || exit 1
+
+# Start the RAN simulator
+CMD ["/opt/ran-sim/ran-simulator.sh"]

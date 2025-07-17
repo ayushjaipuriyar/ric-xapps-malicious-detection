@@ -1,0 +1,12 @@
+server:
+  port: 8081
+logging:
+  level:
+    org.onap.ccsdk.oran: INFO
+app:
+  webclient:
+    trust-store-used: false
+    trust-store: ""
+    trust-store-password: ""
+  a1-adapter:
+    base-url: "http://nearrt-ric:36421"

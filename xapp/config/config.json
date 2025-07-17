@@ -1,0 +1,25 @@
+{
+  "xapp_name": "sample-xapp",
+  "version": "1.0.0",
+  "containers": [
+    {
+      "name": "sample-xapp",
+      "image": {
+        "registry": "local",
+        "name": "openran-xapp",
+        "tag": "latest"
+      }
+    }
+  ],
+  "messaging": {
+    "ports": [
+      {
+        "name": "rmr-data",
+        "container": "sample-xapp",
+        "port": 4560,
+        "rxMessages": ["RIC_SUB_RESP", "RIC_INDICATION"],
+        "txMessages": ["RIC_SUB_REQ", "RIC_CONTROL_REQ"]
+      }
+    ]
+  }
+}

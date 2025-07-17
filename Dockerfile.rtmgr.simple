@@ -1,0 +1,34 @@
+# Simple Routing Manager Service
+FROM --platform=linux/amd64 alpine:3.18
+
+RUN apk add --no-cache \
+    curl \
+    netcat-openbsd \
+    ca-certificates
+
+RUN addgroup -g 1000 rtmgr && \
+    adduser -u 1000 -G rtmgr -s /bin/sh -D rtmgr
+
+RUN mkdir -p /opt/rtmgr/{logs,config} && \
+    chown -R rtmgr:rtmgr /opt/rtmgr
+
+RUN cat > /opt/rtmgr/rtmgr-simulator.sh << 'EOF'
+#!/bin/sh
+echo "Routing Manager Service starting..."
+echo "RMR routing service on port 4561..."
+
+while true; do
+    echo "Routing Manager: Managing RMR routes on port 4561..."
+    sleep 30
+done
+EOF
+
+RUN chmod +x /opt/rtmgr/rtmgr-simulator.sh && \
+    chown rtmgr:rtmgr /opt/rtmgr/rtmgr-simulator.sh
+
+USER rtmgr
+EXPOSE 4561
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD pgrep -f rtmgr-simulator || exit 1
+
+CMD ["/opt/rtmgr/rtmgr-simulator.sh"]

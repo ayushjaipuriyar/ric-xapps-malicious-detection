@@ -1,0 +1,74 @@
+# Simple xApp Dockerfile
+FROM --platform=linux/amd64 alpine:3.18
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    libstdc++ \
+    libgcc \
+    curl \
+    openssl \
+    zlib \
+    boost-system \
+    boost-filesystem \
+    protobuf \
+    ca-certificates
+
+# Create xapp user for security
+RUN addgroup -g 1000 xapp && \
+    adduser -u 1000 -G xapp -s /bin/sh -D xapp
+
+# Set up directories
+RUN mkdir -p /opt/xapp/{config,logs,data} && \
+    chown -R xapp:xapp /opt/xapp
+
+# Create simple xApp simulator
+RUN cat > /opt/xapp/xapp-simulator.sh << 'EOF'
+#!/bin/sh
+
+echo "OpenRAN xApp Simulator starting..."
+echo "xApp Name: ${XAPP_NAME:-sample-xapp}"
+echo "Log Level: ${LOG_LEVEL:-INFO}"
+
+iteration=0
+while true; do
+    iteration=$((iteration + 1))
+    echo "=== xApp Iteration $iteration ==="
+    echo "Processing E2 indication messages..."
+    echo "Analyzing RAN metrics..."
+    echo "Making control decisions..."
+    echo "Sending control messages to RAN..."
+    
+    # Simulate xApp processing
+    sleep 15
+done
+EOF
+
+RUN chmod +x /opt/xapp/xapp-simulator.sh && \
+    chown xapp:xapp /opt/xapp/xapp-simulator.sh
+
+# Create configuration files
+RUN mkdir -p /opt/xapp/config && \
+    cat > /opt/xapp/config/routes.txt << 'EOF'
+newrt|start
+rte|12001|e2term:36421
+rte|12002|e2mgr:3800
+newrt|end
+EOF
+
+# Switch to non-root user
+USER xapp
+
+# Set environment variables
+ENV XAPP_NAME=sample-xapp
+ENV LOG_LEVEL=INFO
+ENV RMR_SEED_RT=/opt/xapp/config/routes.txt
+
+# Expose ports
+EXPOSE 4560 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD pgrep -f xapp-simulator || exit 1
+
+# Start the xApp simulator
+CMD ["/opt/xapp/xapp-simulator.sh"]

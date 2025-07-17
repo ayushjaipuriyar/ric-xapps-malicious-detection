@@ -1,0 +1,169 @@
+# OpenRAN xApp Dockerfile
+# Container for running xApps in the OpenRAN environment
+
+FROM ubuntu:20.04
+
+# Prevent interactive installation prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Set environment variables
+ENV RIC_HOST=nearrt-ric
+ENV RIC_PORT=36421
+ENV XAPP_NAME=sample-xapp
+ENV LOG_LEVEL=INFO
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    curl \
+    git \
+    pkg-config \
+    libsctp-dev \
+    libssl-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    libzmq3-dev \
+    libjsoncpp-dev \
+    libcurl4-openssl-dev \
+    libboost-all-dev \
+    python3 \
+    python3-pip \
+    python3-dev \
+    net-tools \
+    iputils-ping \
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages for ML/AI applications
+RUN pip3 install --no-cache-dir \
+    numpy \
+    pandas \
+    scikit-learn \
+    tensorflow \
+    torch \
+    gym \
+    requests \
+    flask \
+    prometheus-client
+
+# Create workspace directory
+WORKDIR /workspace
+
+# Clone and build xApp framework
+RUN git clone -b bronze https://github.com/o-ran-sc/ric-app-fw-c xapp-fw && \
+    cd xapp-fw && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DDEV_PKG=1 && \
+    make -j$(nproc) && \
+    make install
+
+# Clone and build RIC message router
+RUN git clone -b bronze https://github.com/o-ran-sc/ric-plt-lib-rmr rmr && \
+    cd rmr && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DDEV_PKG=1 && \
+    make -j$(nproc) && \
+    make install
+
+# Set up xApp directory structure
+RUN mkdir -p /opt/xapp/{bin,config,logs,data,src}
+
+# Create sample xApp configuration
+RUN cat > /opt/xapp/config/config.json << 'EOF'
+{
+  "xapp_name": "sample-xapp",
+  "version": "1.0.0",
+  "containers": [
+    {
+      "name": "sample-xapp",
+      "image": {
+        "registry": "local",
+        "name": "openran-xapp",
+        "tag": "latest"
+      }
+    }
+  ],
+  "messaging": {
+    "ports": [
+      {
+        "name": "rmr-data",
+        "container": "sample-xapp",
+        "port": 4560,
+        "rxMessages": ["RIC_SUB_RESP", "RIC_INDICATION"],
+        "txMessages": ["RIC_SUB_REQ", "RIC_CONTROL_REQ"]
+      }
+    ]
+  }
+}
+EOF
+
+# Create sample xApp source files
+RUN cat > /opt/xapp/src/CMakeLists.txt << 'EOF'
+cmake_minimum_required(VERSION 3.5)
+project(sample-xapp)
+
+set(CMAKE_CXX_STANDARD 17)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(RMR REQUIRED rmr)
+
+add_executable(sample-xapp main.cpp)
+target_link_libraries(sample-xapp ${RMR_LIBRARIES})
+target_include_directories(sample-xapp PRIVATE ${RMR_INCLUDE_DIRS})
+EOF
+
+RUN cat > /opt/xapp/src/main.cpp << 'EOF'
+#include <iostream>
+#include <unistd.h>
+
+int main() {
+    std::cout << "Sample xApp starting..." << std::endl;
+    
+    // Main xApp loop
+    while (true) {
+        std::cout << "xApp running..." << std::endl;
+        sleep(10);
+    }
+    
+    return 0;
+}
+EOF
+
+# Build sample xApp
+RUN cd /opt/xapp/src && \
+    mkdir build && \
+    cd build && \
+    cmake .. && \
+    make -j$(nproc)
+
+# Create xApp startup script
+RUN cat > /opt/xapp/start-xapp.sh << 'EOF'
+#!/bin/bash
+
+# Wait for RIC to be ready
+echo "Waiting for RIC to be ready..."
+while ! nc -z ${RIC_HOST} ${RIC_PORT}; do
+    sleep 1
+done
+
+echo "RIC is ready, starting xApp..."
+
+# Start the xApp
+cd /opt/xapp/src/build
+./sample-xapp -c /opt/xapp/config/config.json
+EOF
+
+RUN chmod +x /opt/xapp/start-xapp.sh
+
+# Expose ports for xApp communication
+EXPOSE 4560 8080 9090
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Start the xApp
+CMD ["/opt/xapp/start-xapp.sh"]
