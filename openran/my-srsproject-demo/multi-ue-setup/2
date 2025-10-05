@@ -1,0 +1,16 @@
+Active RF plugins: libsrsran_rf_zmq.so
+Inactive RF plugins: 
+Reading configuration file ue3_zmq.conf...
+
+Built in Release mode using commit ec29b0c1f on branch master.
+
+Opening 1 channels in RF device=zmq with args=tx_port=tcp://127.0.0.1:2301,rx_port=tcp://127.0.0.1:2300,base_srate=11.52e6
+Supported RF device list: zmq file
+CHx base_srate=11.52e6
+Current sample rate is 1.92 MHz with a base rate of 11.52 MHz (x6 decimation)
+CH0 rx_port=tcp://127.0.0.1:2300
+CH0 tx_port=tcp://127.0.0.1:2301
+Current sample rate is 11.52 MHz with a base rate of 11.52 MHz (x1 decimation)
+Current sample rate is 11.52 MHz with a base rate of 11.52 MHz (x1 decimation)
+Waiting PHY to initialize ... done!
+Attaching UE...
